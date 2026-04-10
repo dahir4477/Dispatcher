@@ -1,22 +1,35 @@
 # syntax=docker/dockerfile:1
 
-# --- Dependencies ---
-FROM node:20-alpine AS deps
-RUN apk add --no-cache libc6-compat
+# Debian-based image: fewer native/binary issues with Next.js than Alpine (musl).
+FROM node:20-bookworm-slim AS deps
 WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
+  && rm -rf /var/lib/apt/lists/*
 
 COPY package.json package-lock.json* ./
-RUN npm ci
+
+# npm ci needs package-lock.json in sync with package.json.
+# If ci fails (peers / lock drift), legacy-peer-deps often fixes CI builds.
+RUN set -eux; \
+  if [ -f package-lock.json ]; then \
+    npm ci || npm ci --legacy-peer-deps; \
+  else \
+    echo "WARNING: package-lock.json missing — using npm install (commit a lockfile for reproducible builds)"; \
+    npm install; \
+  fi
 
 # --- Build ---
-FROM node:20-alpine AS builder
+FROM node:20-bookworm-slim AS builder
 WORKDIR /app
 ENV NEXT_TELEMETRY_DISABLED=1
+
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
+  && rm -rf /var/lib/apt/lists/*
 
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 
-# Build-time public env (optional). Prefer runtime env in K8s for server/API.
 ARG NEXT_PUBLIC_SUPABASE_URL
 ARG NEXT_PUBLIC_SUPABASE_ANON_KEY
 ARG NEXT_PUBLIC_SITE_URL
@@ -26,15 +39,15 @@ ENV NEXT_PUBLIC_SITE_URL=$NEXT_PUBLIC_SITE_URL
 
 RUN npm run build
 
-# --- Production runner ---
-FROM node:20-alpine AS runner
+# --- Production runner (minimal) ---
+FROM node:20-bookworm-slim AS runner
 WORKDIR /app
 
 ENV NODE_ENV=production
 ENV NEXT_TELEMETRY_DISABLED=1
 
-RUN addgroup --system --gid 1001 nodejs
-RUN adduser --system --uid 1001 nextjs
+RUN groupadd --system --gid 1001 nodejs \
+  && useradd --system --uid 1001 --gid nodejs nextjs
 
 COPY --from=builder /app/public ./public
 COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
